@@ -264,7 +264,7 @@ async function updateAllPaymentsToAccepted(installmentId: string, userId: string
   await syncInstallmentAddons(installmentId, userId);
 }
 
-async function syncInstallmentAddons(installmentId: string, userId: string): Promise<void> {
+export async function syncInstallmentAddons(installmentId: string, userId: string): Promise<void> {
   const db = getFirestore();
   const txSnap = await db
     .collection(Collections.installmentTransactions)
