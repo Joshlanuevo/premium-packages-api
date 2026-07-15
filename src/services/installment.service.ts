@@ -3,9 +3,13 @@ import { randomUUID } from "node:crypto";
 import { Collections } from "../constants/collections";
 import { computeAddonsSync } from "./addons.calc";
 import { computeSubmissionPaymentStatus } from "./submissionStatus.calc";
+import {
+  computeBalanceAfterPayment,
+  computeDistributeRemainingBalance,
+  computeDeductExcess,
+} from "./balance.calc";
 import { getInstallmentTransaction, getPaymentsForInstallment } from "./paymentTerms.service";
 import {
-  getSubmission,
   setSubmissionPaymentStatus,
   setSubmissionVerifiedAfterAccept,
   markGuestAddonsPaidInSubmission,
@@ -65,6 +69,8 @@ interface StoredPayment {
   status: PaymentStatus;
   type?: string;
   installmentId?: string;
+  amountPaidPhp?: number;
+  amountPaidUsd?: number;
   [key: string]: unknown;
 }
 
@@ -74,24 +80,6 @@ function throwStatus(status: number, message: string): never {
   throw error;
 }
 
-/**
- * Ported from update_payment(), MINUS the wallet-deduction branch (dropped
- * per the no-wallet architecture decision — see NOTES.local.md) and MINUS
- * two paths whose legacy source isn't available yet:
- *
- *   - amountPaidPartial (partial payment): needs distribute_remaining_balance()
- *     and deduct_excess_from_remaining_payments(), not yet seen. Rather than
- *     silently skipping the redistribution math, this REFUSES the request
- *     outright (501) so nobody assumes partial payments work correctly here.
- *   - accepting a 'full' payment: needs update_all_payments_to_accepted()
- *     (marks every sibling payment accepted too), not yet seen. Also
- *     explicitly refused (501). Rejecting a 'full' payment IS fully ported
- *     (it's just a delete, confirmed from source).
- *
- * Everything else IS fully ported from real source: status transition
- * validation, addons sync (computeAddonsSync), guest-addons-paid marking,
- * and submission payment_status recomputation (computeSubmissionPaymentStatus).
- */
 export async function updatePayment(payload: UpdatePaymentPayload, userId: string) {
   const db = getFirestore();
   const ref = db.collection(Collections.installmentPayments).doc(payload.id);
@@ -108,35 +96,67 @@ export async function updatePayment(payload: UpdatePaymentPayload, userId: strin
     throwStatus(400, `Invalid status transition: ${current.status} -> ${payload.status}`);
   }
 
-  if (payload.amountPaidPartial) {
-    throwStatus(
-      501,
-      "Partial payment redistribution is not yet implemented in this backend (needs distribute_remaining_balance/deduct_excess_from_remaining_payments source)."
-    );
-  }
-
-  if (current.type === "full" && payload.status === "accepted") {
-    throwStatus(
-      501,
-      "Accepting a full-payment settlement is not yet implemented in this backend (needs update_all_payments_to_accepted source)."
-    );
-  }
-
   const now = new Date().toISOString();
+  const originalAmountPhp = payload.amountPaidPhp ?? current.amountPaidPhp ?? 0;
+  const originalAmountUsd = payload.amountPaidUsd ?? current.amountPaidUsd ?? 0;
+
+  const amountToDeductPhp =
+    payload.amountPaidPartial && payload.amountPaidPartial > 0 ? payload.amountPaidPartial : originalAmountPhp;
+  const amountToDeductUsd =
+    payload.amountPaidPartial && payload.amountPaidPartial > 0 && originalAmountPhp > 0
+      ? originalAmountUsd * (payload.amountPaidPartial / originalAmountPhp)
+      : originalAmountUsd;
+
   const updates: Record<string, unknown> = {
     status: payload.status,
     updated_at: now,
     updated_by: userId,
   };
 
+  if (payload.amountPaidPartial && payload.amountPaidPartial > 0 && payload.status === "accepted") {
+    updates.amountPaidPhp = payload.amountPaidPartial;
+    updates.amountPaidUsd = amountToDeductUsd;
+    updates.amountPaidPartial = payload.amountPaidPartial;
+  }
+  if (payload.status === "rejected") {
+    updates.amountPaidPartial = 0;
+  }
+
   await ref.set(updates, { merge: true });
 
-  if (current.type === "full" && payload.status === "rejected") {
-    // Legacy deletes the payment record entirely on full-payment rejection,
-    // reverting the booking to its prior installment schedule.
-    await ref.delete();
+  const installmentId = payload.installmentId ?? current.installmentId;
+
+  if (payload.status === "accepted" && payload.amountPaidPartial && payload.amountPaidPartial > 0 && installmentId) {
+    const remainingBalancePhp = originalAmountPhp - payload.amountPaidPartial;
+    const remainingBalanceUsd = originalAmountUsd - amountToDeductUsd;
+
+    const allPayments = await getPaymentsForInstallment(installmentId);
+
+    if (remainingBalancePhp > 0 || remainingBalanceUsd > 0) {
+      const redistributions = computeDistributeRemainingBalance(
+        allPayments,
+        payload.id,
+        remainingBalancePhp,
+        remainingBalanceUsd
+      );
+      await applyRedistributions(redistributions, userId);
+    } else if (remainingBalancePhp < 0 || remainingBalanceUsd < 0) {
+      const excessPhp = payload.amountPaidPartial - originalAmountPhp;
+      const excessUsd = amountToDeductUsd - originalAmountUsd;
+      const redistributions = computeDeductExcess(allPayments, payload.id, excessPhp, excessUsd);
+      await applyRedistributions(redistributions, userId);
+    }
+  }
+
+  if (current.type === "full") {
+    if (payload.status === "rejected") {
+      await ref.delete();
+    } else if (payload.status === "accepted") {
+      if (installmentId) {
+        await updateAllPaymentsToAccepted(installmentId, userId);
+      }
+    }
   } else if (current.type === "addons") {
-    const installmentId = payload.installmentId ?? current.installmentId;
     if (installmentId) {
       await syncInstallmentAddons(installmentId, userId);
     }
@@ -144,8 +164,10 @@ export async function updatePayment(payload: UpdatePaymentPayload, userId: strin
       await markGuestAddonsPaidInSubmission(payload.submissionId);
     }
   } else if (payload.status === "accepted") {
+    if (installmentId) {
+      await applyCalculateBalance(installmentId, amountToDeductPhp, amountToDeductUsd, userId);
+    }
     if (payload.submissionId) {
-      const installmentId = payload.installmentId ?? current.installmentId;
       const [payments, installment] = installmentId
         ? await Promise.all([getPaymentsForInstallment(installmentId), getInstallmentTransaction(installmentId)])
         : [[], null];
@@ -153,7 +175,6 @@ export async function updatePayment(payload: UpdatePaymentPayload, userId: strin
       await setSubmissionVerifiedAfterAccept(payload.submissionId, recomputed);
     }
   } else if (payload.status === "rejected" || payload.status === "pending") {
-    const installmentId = payload.installmentId ?? current.installmentId;
     if (payload.submissionId && installmentId) {
       const [payments, installment] = await Promise.all([
         getPaymentsForInstallment(installmentId),
@@ -169,11 +190,80 @@ export async function updatePayment(payload: UpdatePaymentPayload, userId: strin
   return { id: payload.id, ...current, ...updates };
 }
 
-/**
- * Ported from syncInstallmentTransactionAddons(). Recomputes an
- * installment's totals from ALL its payments and writes the result back —
- * see computeAddonsSync (addons.calc.ts) for the pure math.
- */
+async function applyRedistributions(
+  redistributions: { id: string; newAmountPaidPhp: number; newAmountPaidUsd: number }[],
+  userId: string
+): Promise<void> {
+  if (redistributions.length === 0) return;
+  const db = getFirestore();
+  const batch = db.batch();
+  const now = new Date().toISOString();
+
+  for (const r of redistributions) {
+    batch.update(db.collection(Collections.installmentPayments).doc(r.id), {
+      amountPaidPhp: r.newAmountPaidPhp,
+      amountPaidUsd: r.newAmountPaidUsd,
+      updated_at: now,
+      updated_by: userId,
+    });
+  }
+
+  await batch.commit();
+}
+
+async function applyCalculateBalance(
+  installmentId: string,
+  paymentAmountPhp: number,
+  paymentAmountUsd: number,
+  userId: string
+): Promise<void> {
+  const db = getFirestore();
+  const txSnap = await db
+    .collection(Collections.installmentTransactions)
+    .where("id", "==", installmentId)
+    .limit(1)
+    .get();
+
+  if (txSnap.empty) {
+    throwStatus(404, "Installment not found.");
+  }
+
+  const txDoc = txSnap.docs[0];
+  const txData = txDoc.data();
+  const result = computeBalanceAfterPayment(
+    txData.remainingBalancePhp ?? 0,
+    txData.remainingBalanceUsd ?? 0,
+    paymentAmountPhp,
+    paymentAmountUsd
+  );
+
+  await txDoc.ref.update({
+    remainingBalancePhp: result.remainingBalancePhp,
+    remainingBalanceUsd: result.remainingBalanceUsd,
+    status: result.status,
+    updated_at: new Date().toISOString(),
+    updated_by: userId,
+  });
+}
+
+async function updateAllPaymentsToAccepted(installmentId: string, userId: string): Promise<void> {
+  const db = getFirestore();
+  const payments = await getPaymentsForInstallment(installmentId);
+  const now = new Date().toISOString();
+
+  const batch = db.batch();
+  for (const payment of payments as { id: string }[]) {
+    batch.update(db.collection(Collections.installmentPayments).doc(payment.id), {
+      status: "accepted",
+      updated_at: now,
+      updated_by: userId,
+    });
+  }
+  await batch.commit();
+
+  await syncInstallmentAddons(installmentId, userId);
+}
+
 async function syncInstallmentAddons(installmentId: string, userId: string): Promise<void> {
   const db = getFirestore();
   const txSnap = await db

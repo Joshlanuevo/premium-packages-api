@@ -20,7 +20,6 @@ export async function setSubmissionPaymentStatus(submissionId: string, status: s
   const db = getFirestore();
   await db.collection(Collections.holidayPackageSubmissions).doc(submissionId).update({
     payment_status: status,
-    updated_at: new Date().toISOString(),
   });
 }
 
