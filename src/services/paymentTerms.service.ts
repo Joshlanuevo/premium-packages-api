@@ -19,7 +19,7 @@ async function getPayment(id: string): Promise<InstallmentPaymentRecord> {
   return snap.data() as InstallmentPaymentRecord;
 }
 
-async function getInstallmentTransaction(installmentId: string): Promise<InstallmentTransactionRecord | null> {
+export  async function getInstallmentTransaction(installmentId: string): Promise<InstallmentTransactionRecord | null> {
   const db = getFirestore();
   const snap = await db
     .collection(Collections.installmentTransactions)
@@ -30,7 +30,7 @@ async function getInstallmentTransaction(installmentId: string): Promise<Install
   return snap.docs[0].data() as InstallmentTransactionRecord;
 }
 
-async function getPaymentsForInstallment(installmentId: string): Promise<InstallmentPaymentRecord[]> {
+export async function getPaymentsForInstallment(installmentId: string): Promise<InstallmentPaymentRecord[]> {
   const db = getFirestore();
   const snap = await db
     .collection(Collections.installmentPayments)
