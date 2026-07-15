@@ -14,7 +14,7 @@ function generateConfirmationNumber(now: Date = new Date()): string {
   const mi = String(now.getMinutes()).padStart(2, "0");
   const ss = String(now.getSeconds()).padStart(2, "0");
   const random = Math.random().toString(36).slice(2, 5).toUpperCase();
-  return `PP${year}${mm}${dd}${hh}${mi}${ss}${random}`;
+  return `GDX${year}${mm}${dd}${hh}${mi}${ss}${random}`;
 }
 
 export interface CreateBookingResult {
@@ -71,11 +71,10 @@ export async function createBooking(payload: BookingPayload, userId: string): Pr
       reservedPax = payload.pax;
     });
 
-    const submissionId = randomUUID();
-    const submissionRef = db.collection(Collections.holidayPackageSubmissions).doc(submissionId);
+    const submissionRef = db.collection(Collections.holidayPackageSubmissions).doc(confirmationNumber);
 
     await submissionRef.set({
-      id: submissionId,
+      id: confirmationNumber,
       transaction_id: confirmationNumber,
       confirmation_number: confirmationNumber,
       package_id: payload.package_id,
@@ -111,7 +110,7 @@ export async function createBooking(payload: BookingPayload, userId: string): Pr
     }
     await batch.commit();
 
-    return { confirmation_number: confirmationNumber, submission_id: submissionId };
+    return { confirmation_number: confirmationNumber, submission_id: confirmationNumber };
   } catch (err) {
     if (reservedTouchedIds.length > 0) {
       await rollbackReservation(payload.package_id, reservedTouchedIds, reservedPax, userId);
