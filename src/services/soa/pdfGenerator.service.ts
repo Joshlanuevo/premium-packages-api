@@ -136,11 +136,13 @@ export async function generateSOAPdf(params: GenerateSOAParams): Promise<Buffer>
     );
 
     const travellersResult = computeSOATravellers({
-        bookingPayload: { rooms: [], traveller_types: request.traveler_types },
+        travellerTypesMetadata: request.traveller_types_metadata,
+        bookingPayload: { rooms: request.rooms, traveller_types: request.traveler_types },
+        packageData: { variations },
+        selectedVariationId: request.variation_id,
         bookingData: { totalPax: request.pax ?? 1 },
         nonInfantPax: request.pax ?? 1,
     });
-
     const paymentsResult = computeSOAPayments(
         {
         packageData: {

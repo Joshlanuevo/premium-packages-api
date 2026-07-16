@@ -20,6 +20,8 @@ export interface BookingPayload {
     due_date?: string;
   };
   lead_guest?: Record<string, unknown>;
+  rooms?: { traveller_types?: Record<string, unknown>; traveller_types_original?: Record<string, unknown> }[];
+  traveller_types_metadata?: Record<string, unknown>[];
   [key: string]: unknown;
 }
 

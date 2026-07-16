@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { getFirestore } from "../config/firebase";
 import { Collections } from "../constants/collections";
 import { reserveSlots, releaseSlots, computeAvailabilityAggregate } from "./availability.reserve";
+import { hasTravellerTypeBreakdown } from "./bookingValidation.calc";
 import { buildInstallmentSchedule } from "./installment.schedule";
 import type { PackageAvailability } from "../types/availability";
 import type { BookingPayload } from "../types/booking";
@@ -23,6 +24,14 @@ export interface CreateBookingResult {
 }
 
 export async function createBooking(payload: BookingPayload, userId: string): Promise<CreateBookingResult> {
+  if (!hasTravellerTypeBreakdown(payload)) {
+    throw Object.assign(
+      new Error(
+        "Booking payload must include a traveller-type pricing breakdown (traveller_types_metadata or rooms[].traveller_types) — required so the Statement of Account can itemize what was actually paid for."
+      ),
+      { status: 400 }
+    );
+  }
   const db = getFirestore();
   const now = new Date();
   const nowIso = now.toISOString();
