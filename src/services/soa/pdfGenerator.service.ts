@@ -69,165 +69,203 @@ async function resolveBannerBase64(agencyLogoUrl: string | undefined): Promise<s
  * buffer via pdfMake.
  */
 export async function generateSOAPdf(params: GenerateSOAParams): Promise<Buffer> {
-  const db = getFirestore();
+    const db = getFirestore();
 
-  const submissionSnap = await db.collection(Collections.holidayPackageSubmissions).doc(params.confirmationNumber).get();
-  if (!submissionSnap.exists) {
-    throw new PaymentTermError(404, "Booking not found.");
-  }
-  const submission = submissionSnap.data() as Record<string, any>;
-  const request = submission?.meta?.request ?? {};
-
-  const packageId = request.package_id;
-  const packageSnap = packageId ? await db.collection(Collections.holidayPackages).doc(packageId).get() : null;
-  const packageData = packageSnap?.exists ? (packageSnap.data() as Record<string, any>) : {};
-
-  const installmentSnap = await db
-    .collection(Collections.installmentTransactions)
-    .where("transactionId", "==", params.confirmationNumber)
-    .limit(1)
-    .get();
-  const installment = installmentSnap.empty ? null : installmentSnap.docs[0].data();
-
-  const payments = installment
-    ? (
-        await db.collection(Collections.installmentPayments).where("installmentId", "==", installment.id).get()
-      ).docs.map((d) => d.data())
-    : [];
-
-  const userContext: UserContext = { isJuanworld: false, isGladex: true, isAdmin: false };
-
-  const soaDataResult = computeSOAData(
-    {
-      recipientData: { name: submission.user_name, email: request.lead_guest?.email },
-      packageData: { title: packageData.title, area: packageData.location, hotel: packageData?.hotels?.[0]?.hotel, variations: [] },
-      selectedVariationId: request.variation_id,
-      bookingData: { confirmationNumber: params.confirmationNumber, createdAt: submission.date_created, preparedBy: submission.agent_name },
-      leadGuest: params.leadGuest ?? request.lead_guest,
-      agencyDetails: params.agencyDetails ?? request.agency_details,
-    },
-    userContext
-  );
-
-  const isInitial = false;
-
-  const itemsResult = computeSOAItems(
-    {
-      baggages: packageData.baggages,
-      visa: packageData.visa,
-      tours: packageData.tours,
-      insurance: packageData.insurance,
-      seats: packageData.seat,
-      taxes: packageData.taxes,
-      tips: packageData.tips,
-      other_fees: packageData.other_fees,
-      commisions: packageData.commisions,
-    },
-    isInitial
-  );
-
-  const travellersResult = computeSOATravellers({
-    bookingPayload: { rooms: [], traveller_types: request.traveler_types },
-    bookingData: { totalPax: request.pax ?? 1 },
-    nonInfantPax: request.pax ?? 1,
-  });
-
-  const paymentsResult = computeSOAPayments(
-    {
-      packageData: {
-        currency: packageData.currency,
-        installment_terms: packageData.installment_terms,
-        reservation_terms: packageData.reservation_terms,
-      },
-      paymentData: { currency: packageData.currency },
-      bookingPayload: { installment_details: request.installment_details },
-      isClientSOA: params.isClientSOA,
-      initial: isInitial,
-    },
-    {
-      ...travellersResult,
-      ...itemsResult,
-      estimatedArrival: soaDataResult.estimatedArrival,
+    const submissionSnap = await db.collection(Collections.holidayPackageSubmissions).doc(params.confirmationNumber).get();
+    if (!submissionSnap.exists) {
+        throw new PaymentTermError(404, "Booking not found.");
     }
-  );
+    const submission = submissionSnap.data() as Record<string, any>;
+    const request = submission?.meta?.request ?? {};
 
-  const projectedResult = computeProjectedPayments(
-    {
-      bookingData: { confirmationNumber: params.confirmationNumber },
-      isFullPayment: request.isFullpayment,
-      bookingPayload: { isFullpayment: request.isFullpayment },
-      packageData: { installment_terms: packageData.installment_terms, reservation_terms: packageData.reservation_terms },
-    },
-    travellersResult.totalPax,
-    soaDataResult.estimatedArrival,
-    paymentsResult.totalPesoAmount,
-    paymentsResult.totalUsdAmount
-  );
+    const packageId = request.package_id;
+        const packageSnap = packageId ? await db.collection(Collections.holidayPackages).doc(packageId).get() : null;
+        const packageData = packageSnap?.exists ? (packageSnap.data() as Record<string, any>) : {};
 
-  const bannerBase64 = await resolveBannerBase64(params.agencyDetails?.brand_logo);
+        // Fetch real blocking dates for ETA/ETD — previously hardcoded to an
+        // empty array, which meant estimatedArrival/estimatedDeparture always
+        // came back null regardless of what the real booking's variation was.
+        const availabilitySnap = packageId
+        ? await db.collection(Collections.packageAvailability).where("package_id", "==", packageId).limit(1).get()
+        : null;
+        const variations = availabilitySnap && !availabilitySnap.empty ? availabilitySnap.docs[0].data().blockings ?? [] : [];
 
-  const soaAssemblyData: SOAAssemblyData = {
-    isGladex: true,
-    isPremiumPackages: true,
-    recipientName: soaDataResult.recipientName,
-    referenceNumber: soaDataResult.referenceNumber,
-    travelInfo: {
-      recipientEmail: soaDataResult.recipientEmail,
-      contactEmail: soaDataResult.contactEmail,
-      estimatedArrival: soaDataResult.estimatedArrival,
-      estimatedDeparture: soaDataResult.estimatedDeparture,
-      totalPax: travellersResult.totalPax,
-      bookingDate: soaDataResult.bookingDate,
-      hotelInfo: soaDataResult.hotelInfo,
-      area: soaDataResult.area,
-      packageTitle: soaDataResult.packageTitle,
-      preparedBy: soaDataResult.preparedBy,
-      leadGuest: params.leadGuest ?? request.lead_guest,
-    },
-    pesoPayment: {
-      basePackage: [],
-      infantTravellers: [],
-      ...itemsResult,
-      totalAmount: paymentsResult.totalPesoAmount,
-      commissionItems: itemsResult.phpCommissionItems.map((c: any) => ({ ...c, nonInfantPax: travellersResult.nonInfantPax })),
-    },
-    bookingPayload: { isFullpayment: request.isFullpayment },
-    projectedPaymentSchedule: projectedResult.isProjection
-      ? {
-          paymentTerms: projectedResult.projectedPaymentTerms,
-          currency: paymentsResult.installmentCurrency,
-          totalPax: travellersResult.totalPax,
-          isFullPayment: projectedResult.isFullPayment,
+
+    const installmentSnap = await db
+        .collection(Collections.installmentTransactions)
+        .where("transactionId", "==", params.confirmationNumber)
+        .limit(1)
+        .get();
+    const installment = installmentSnap.empty ? null : installmentSnap.docs[0].data();
+
+    const payments = installment
+        ? (
+            await db.collection(Collections.installmentPayments).where("installmentId", "==", installment.id).get()
+        ).docs.map((d) => d.data())
+        : [];
+
+    const userContext: UserContext = { isJuanworld: false, isGladex: true, isAdmin: false };
+
+    const soaDataResult = computeSOAData(
+        {
+        recipientData: { name: submission.user_name, email: request.lead_guest?.email },
+        packageData: { title: packageData.title, area: packageData.location, hotel: packageData?.hotels?.[0]?.hotel, variations },
+        selectedVariationId: request.variation_id,
+        bookingData: { confirmationNumber: params.confirmationNumber, createdAt: submission.date_created, preparedBy: submission.agent_name },
+        leadGuest: params.leadGuest ?? request.lead_guest,
+        agencyDetails: params.agencyDetails ?? request.agency_details,
+        },
+        userContext
+    );
+
+    const isInitial = false;
+
+    const itemsResult = computeSOAItems(
+        {
+        baggages: packageData.baggages,
+        visa: packageData.visa,
+        tours: packageData.tours,
+        insurance: packageData.insurance,
+        seats: packageData.seat,
+        taxes: packageData.taxes,
+        tips: packageData.tips,
+        other_fees: packageData.other_fees,
+        commisions: packageData.commisions,
+        },
+        isInitial
+    );
+
+    const travellersResult = computeSOATravellers({
+        bookingPayload: { rooms: [], traveller_types: request.traveler_types },
+        bookingData: { totalPax: request.pax ?? 1 },
+        nonInfantPax: request.pax ?? 1,
+    });
+
+    const paymentsResult = computeSOAPayments(
+        {
+        packageData: {
+            currency: packageData.currency,
+            installment_terms: packageData.installment_terms,
+            reservation_terms: packageData.reservation_terms,
+        },
+        paymentData: { currency: packageData.currency },
+        bookingPayload: { installment_details: request.installment_details },
+        isClientSOA: params.isClientSOA,
+        initial: isInitial,
+        },
+        {
+        ...travellersResult,
+        ...itemsResult,
+        estimatedArrival: soaDataResult.estimatedArrival,
         }
-      : null,
-    actualPaymentTerms:
-      !projectedResult.isProjection && payments.length > 0
-        ? {
-            terms: payments as any,
-            currency: paymentsResult.installmentCurrency as "PHP" | "USD",
+    );
+
+    const projectedResult = computeProjectedPayments(
+        {
+        bookingData: { confirmationNumber: params.confirmationNumber },
+        isFullPayment: request.isFullpayment,
+        bookingPayload: { isFullpayment: request.isFullpayment },
+        packageData: { installment_terms: packageData.installment_terms, reservation_terms: packageData.reservation_terms },
+        },
+        travellersResult.totalPax,
+        soaDataResult.estimatedArrival,
+        paymentsResult.totalPesoAmount,
+        paymentsResult.totalUsdAmount
+    );
+
+    const bannerBase64 = await resolveBannerBase64(params.agencyDetails?.brand_logo);
+
+    const basePackage =
+        packageData.currency === "USD"
+        ? []
+        : travellersResult.nonInfantTravellerTypes.map((t) => ({
+            title: `${soaDataResult.packageTitle} (${t.title ?? ""})`,
+            unitPrice: t.price ?? 0,
+            pax: t.quantity,
+            amount: t.total ?? 0,
+            }));
+
+    const soaAssemblyData: SOAAssemblyData = {
+        isGladex: true,
+        isPremiumPackages: true,
+        recipientName: soaDataResult.recipientName,
+        referenceNumber: soaDataResult.referenceNumber,
+        travelInfo: {
+            recipientEmail: soaDataResult.recipientEmail,
+            contactEmail: soaDataResult.contactEmail,
+            estimatedArrival: soaDataResult.estimatedArrival,
+            estimatedDeparture: soaDataResult.estimatedDeparture,
             totalPax: travellersResult.totalPax,
-          }
+            bookingDate: soaDataResult.bookingDate,
+            hotelInfo: soaDataResult.hotelInfo,
+            area: soaDataResult.area,
+            packageTitle: soaDataResult.packageTitle,
+            preparedBy: soaDataResult.preparedBy,
+            leadGuest: params.leadGuest ?? request.lead_guest,
+        },
+        pesoPayment: {
+            basePackage,
+            infantTravellers: [],
+            ...itemsResult,
+            totalAmount: paymentsResult.totalPesoAmount,
+            commissionItems: itemsResult.phpCommissionItems.map((c: any) => ({ ...c, nonInfantPax: travellersResult.nonInfantPax })),
+        },
+        bookingPayload: { isFullpayment: request.isFullpayment },
+        paymentSchedule: {
+            installmentCurrency: paymentsResult.installmentCurrency,
+            guaranteeDepositAmount: paymentsResult.guaranteeDepositAmount,
+            guaranteeDepositDeadline: paymentsResult.guaranteeDepositDeadline,
+            fullPaymentDeadline: paymentsResult.fullPaymentDeadline,
+            totalPax: travellersResult.totalPax,
+        },
+        fullPayment: {
+            fullpaymentCurrency: packageData.currency ?? "PHP",
+            fullPaymentDeadline: paymentsResult.fullPaymentDeadline,
+            perPaxAmount: paymentsResult.perPaxAmount,
+            totalPax: travellersResult.totalPax,
+        },
+        fullPaymentInfo: {
+            currency: packageData.currency ?? "PHP",
+            totalAmount: packageData.currency === "USD" ? paymentsResult.totalUsdAmount : paymentsResult.totalPesoAmount,
+            totalPax: travellersResult.totalPax,
+            packageStatus: submission.status,
+        },
+        projectedPaymentSchedule: projectedResult.isProjection
+        ? {
+            paymentTerms: projectedResult.projectedPaymentTerms,
+            currency: paymentsResult.installmentCurrency,
+            totalPax: travellersResult.totalPax,
+            isFullPayment: projectedResult.isFullPayment,
+            }
         : null,
-  };
+        actualPaymentTerms:
+        !projectedResult.isProjection && payments.length > 0
+            ? {
+                terms: payments as any,
+                currency: paymentsResult.installmentCurrency as "PHP" | "USD",
+                totalPax: travellersResult.totalPax,
+            }
+            : null,
+        };
 
-  const content = buildSOADocumentContent(soaAssemblyData, {
-    bannerBase64,
-    isClientSOA: params.isClientSOA,
-    bankDetails: params.bankDetails ?? [],
-    effectiveAgencyDetails: params.agencyDetails ?? request.agency_details,
-    user: userContext,
-  });
+    const content = buildSOADocumentContent(soaAssemblyData, {
+        bannerBase64,
+        isClientSOA: params.isClientSOA,
+        bankDetails: params.bankDetails ?? [],
+        effectiveAgencyDetails: params.agencyDetails ?? request.agency_details,
+        user: userContext,
+    });
 
-  const docDefinition = buildSOADocumentDefinition(content);
+    const docDefinition = buildSOADocumentDefinition(content);
 
-  const printer = new PdfPrinter(FONTS);
-  const pdfDoc = printer.createPdfKitDocument(docDefinition as any);
+    const printer = new PdfPrinter(FONTS);
+    const pdfDoc = printer.createPdfKitDocument(docDefinition as any);
 
-  return new Promise((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    pdfDoc.on("data", (chunk: Buffer) => chunks.push(chunk));
-    pdfDoc.on("end", () => resolve(Buffer.concat(chunks)));
-    pdfDoc.on("error", reject);
-    pdfDoc.end();
-  });
+    return new Promise((resolve, reject) => {
+        const chunks: Buffer[] = [];
+        pdfDoc.on("data", (chunk: Buffer) => chunks.push(chunk));
+        pdfDoc.on("end", () => resolve(Buffer.concat(chunks)));
+        pdfDoc.on("error", reject);
+        pdfDoc.end();
+    });
 }
