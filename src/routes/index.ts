@@ -7,6 +7,7 @@ import bookingRoutes from "./booking.routes";
 import paymentTermsRoutes from "./paymentTerms.routes";
 import installmentLifecycleRoutes from "./installmentLifecycle.routes";
 import transactionRoutes from "./transaction.routes";
+import soaRoutes from "./soa.routes";
 
 const router = Router();
 
@@ -18,5 +19,6 @@ router.use(bookingRoutes);
 router.use(paymentTermsRoutes);
 router.use(installmentLifecycleRoutes);
 router.use(transactionRoutes);
+router.use(soaRoutes);
 
 export default router;
