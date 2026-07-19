@@ -11,13 +11,15 @@ import { buildSOADocumentContent, buildSOADocumentDefinition } from "./documentA
 import type { SOAAssemblyData, BankDetailEntry } from "./documentAssembly";
 import { compositeBannerWithLogo, fetchImageBuffer } from "./bannerCompositor";
 import { PaymentTermError } from "../paymentTerms.calc";
+import { fetchBankDetailsForAgency, fetchAgencyDetails } from "../agency.service";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-// KNOWN GAP: agencies/bank-details Firestore collections have not been
-// confirmed yet (schema never seen). Accepted as request inputs for now —
-// same as legacy, which also supports user-provided overrides for these —
-// rather than guessing at a collection structure. Revisit once confirmed.
+// agencyDetails/bankDetails below are now OPTIONAL OVERRIDES — if omitted,
+// they're fetched automatically from Firestore via a two-hop lookup: the
+// booking's agent_id (a user ID) resolves to that user's own agency_id
+// field, which THEN resolves to bank/agency details. Only pass these
+// explicitly if you need to override what's actually stored.
 export interface GenerateSOAParams {
   confirmationNumber: string;
   isClientSOA: boolean;
@@ -106,14 +108,29 @@ export async function generateSOAPdf(params: GenerateSOAParams): Promise<Buffer>
 
     const userContext: UserContext = { isJuanworld: false, isGladex: true, isAdmin: false };
 
+    // FIX: submission.agent_id is a USER ID (it equals submission.userId /
+    // created_by in real test data), NOT an agency ID — confirmed by checking
+    // real Firestore data, where filtering users by agency_id == agent_id
+    // returned no genuine match. The correct lookup is a TWO-HOP one: fetch
+    // the user doc directly by ID first, read THEIR OWN agency_id field, and
+    // only then use that real agency ID to look up bank/agency details.
+    const bookingUserId = submission.agent_id ?? submission.userId;
+    const bookingUserSnap = bookingUserId ? await db.collection(Collections.users).doc(bookingUserId).get() : null;
+    const agencyLookupId = bookingUserSnap?.exists ? bookingUserSnap.data()?.agency_id : null;
+
+    const [fetchedBankDetails, fetchedAgencyDetails] = await Promise.all([
+        params.bankDetails ? Promise.resolve(params.bankDetails) : fetchBankDetailsForAgency(agencyLookupId),
+        params.agencyDetails ? Promise.resolve(params.agencyDetails) : fetchAgencyDetails(agencyLookupId),
+    ]);
+
     const soaDataResult = computeSOAData(
         {
-        recipientData: { name: submission.user_name, email: request.lead_guest?.email },
-        packageData: { title: packageData.title, area: packageData.location, hotel: packageData?.hotels?.[0]?.hotel, variations },
-        selectedVariationId: request.variation_id,
-        bookingData: { confirmationNumber: params.confirmationNumber, createdAt: submission.date_created, preparedBy: submission.agent_name },
-        leadGuest: params.leadGuest ?? request.lead_guest,
-        agencyDetails: params.agencyDetails ?? request.agency_details,
+            recipientData: { name: submission.user_name, email: request.lead_guest?.email },
+            packageData: { title: packageData.title, area: packageData.location, hotel: packageData?.hotels?.[0]?.hotel, variations },
+            selectedVariationId: request.variation_id,
+            bookingData: { confirmationNumber: params.confirmationNumber, createdAt: submission.date_created, preparedBy: submission.agent_name },
+            leadGuest: params.leadGuest ?? request.lead_guest,
+            agencyDetails: fetchedAgencyDetails ?? request.agency_details ?? undefined,
         },
         userContext
     );
@@ -175,7 +192,7 @@ export async function generateSOAPdf(params: GenerateSOAParams): Promise<Buffer>
         paymentsResult.totalUsdAmount
     );
 
-    const bannerBase64 = await resolveBannerBase64(params.agencyDetails?.brand_logo);
+    const bannerBase64 = await resolveBannerBase64(fetchedAgencyDetails?.brand_logo);
 
     const basePackage =
         packageData.currency === "USD"
@@ -253,8 +270,8 @@ export async function generateSOAPdf(params: GenerateSOAParams): Promise<Buffer>
     const content = buildSOADocumentContent(soaAssemblyData, {
         bannerBase64,
         isClientSOA: params.isClientSOA,
-        bankDetails: params.bankDetails ?? [],
-        effectiveAgencyDetails: params.agencyDetails ?? request.agency_details,
+        bankDetails: fetchedBankDetails,
+        effectiveAgencyDetails: fetchedAgencyDetails ?? request.agency_details,
         user: userContext,
     });
 
