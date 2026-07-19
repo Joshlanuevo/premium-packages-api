@@ -11,6 +11,7 @@ export const Collections = {
   holidayPackageSubmissions: "holiday_package_submissions",
   users: "users",
   agencies: "agencies",
+  categories: "holiday_package_categories",
 } as const;
 
 export type CollectionName = (typeof Collections)[keyof typeof Collections];
