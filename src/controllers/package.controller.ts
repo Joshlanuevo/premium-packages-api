@@ -2,6 +2,8 @@ import { Request, Response } from "express";
 import { AuthedRequest } from "../middleware/auth";
 import { ok } from "../utils/response";
 import * as PackageService from "../services/package.service";
+import { computeAllowedActions } from "../constants/permissions";
+import { Role } from "../constants/roles";
 
 export async function writePackage(req: AuthedRequest, res: Response) {
   const userId = req.user!.userId;
@@ -12,10 +14,12 @@ export async function writePackage(req: AuthedRequest, res: Response) {
 export async function getPackage(req: AuthedRequest, res: Response) {
   const result = await PackageService.getPackage(req.params.id);
   if (!result) return res.status(404).json({ error: "Package not found." });
-  return ok(res, result);
+
+  const allowedActions = computeAllowedActions(req.user?.role as Role | undefined);
+  return ok(res, { ...result, allowedActions });
 }
 
-export async function listPackages(req: Request, res: Response) {
+export async function listPackages(req: AuthedRequest, res: Response) {
   const q = req.query;
   const filters: PackageService.PackageListFilters = {
     category: typeof q.category === "string" ? q.category : undefined,
@@ -31,7 +35,10 @@ export async function listPackages(req: Request, res: Response) {
   };
 
   const result = await PackageService.listPackages(filters);
-  return ok(res, result);
+  const allowedActions = computeAllowedActions(req.user?.role as Role | undefined);
+  const items = result.items.map((item) => ({ ...item, allowedActions }));
+
+  return ok(res, { items, nextCursor: result.nextCursor });
 }
 
 export async function listCategories(_req: Request, res: Response) {
