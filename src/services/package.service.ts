@@ -81,7 +81,9 @@ export async function getPackage(id: string) {
   const db = getFirestore();
   const snap = await db.collection(Collections.holidayPackages).doc(id).get();
   if (!snap.exists) return null;
-  return snap.data();
+  const data = snap.data();
+  const availability = await getAvailability(id);
+  return { ...data, availability };
 }
 
 export async function getAvailability(packageId: string): Promise<PackageAvailability | null> {
