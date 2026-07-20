@@ -9,6 +9,7 @@ import installmentLifecycleRoutes from "./installmentLifecycle.routes";
 import transactionRoutes from "./transaction.routes";
 import soaRoutes from "./soa.routes";
 import submissionsRoutes from "./submissions.routes";
+import userRoutes from "./user.routes";
 
 const router = Router();
 
@@ -22,5 +23,6 @@ router.use(installmentLifecycleRoutes);
 router.use(transactionRoutes);
 router.use(soaRoutes);
 router.use(submissionsRoutes);
+router.use(userRoutes);
 
 export default router;
