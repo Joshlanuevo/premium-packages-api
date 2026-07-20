@@ -61,6 +61,7 @@ export async function writePackage(payload: PackagePayload, userId: string) {
     ...packageFields,
     id,
     currency: payload.currency ?? "PHP",
+    ...(packageFields.title ? { title_lower: String(packageFields.title).toLowerCase() } : {}),
     ...(existing.exists
       ? { date_updated: now, updated_by: userId }
       : { date_created: now, user_id: userId }),
@@ -153,11 +154,11 @@ export async function listPackages(filters: PackageListFilters): Promise<Package
   const usePriceRangeServerSide = !hasSearch && (filters.minPrice != null || filters.maxPrice != null);
 
   if (hasSearch) {
-    const term = filters.search!;
+    const term = filters.search!.toLowerCase();
     query = query
-      .where("title", ">=", term)
-      .where("title", "<=", term + "\uf8ff")
-      .orderBy("title", "asc");
+      .where("title_lower", ">=", term)
+      .where("title_lower", "<=", term + "\uf8ff")
+      .orderBy("title_lower", "asc");
   } else if (usePriceRangeServerSide) {
     if (filters.minPrice != null) query = query.where("cost", ">=", filters.minPrice);
     if (filters.maxPrice != null) query = query.where("cost", "<=", filters.maxPrice);
@@ -183,7 +184,7 @@ export async function listPackages(filters: PackageListFilters): Promise<Package
   }
 
   const last = snap.docs[snap.docs.length - 1];
-  const sortField = hasSearch ? "title" : usePriceRangeServerSide ? "cost" : filters.sortKey ?? "date_created";
+  const sortField = hasSearch ? "title_lower" : usePriceRangeServerSide ? "cost" : filters.sortKey ?? "date_created";
   const nextCursor = snap.docs.length === limit && last ? String(last.get(sortField)) : null;
 
   return { items, nextCursor };
